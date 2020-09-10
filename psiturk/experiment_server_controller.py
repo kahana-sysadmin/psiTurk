@@ -141,16 +141,17 @@ class ExperimentServerController(object):
             self.server_running = False
 
     def kill_child_processes(self, parent_pid, sig=signal.SIGTERM):
-        if os.uname()[0] is 'Linux':
-            ps_command = subprocess.Popen('pstree -p %d | perl -ne \'print "$1 "\
-                                          while /\((\d+)\)/g\'' % parent.pid,
+        if os.uname()[0] == 'Linux':
+            ps_command = subprocess.Popen(f'pstree -p {parent_pid} | perl -ne \'print "$1 \
+                                          " while /\((\d+)\)/g\'',
                                           shell=True, stdout=subprocess.PIPE)
             ps_output = ps_command.stdout.read()
             retcode = ps_command.wait()
-            assert retcode == 0, "ps command returned %d" % retcode
-            for pid_str in ps_output.split("\n")[:-1]:
+            assert retcode == 0, f"ps command returned {retcode}"
+            for pid_str in ps_output.split(b"\n")[:-1]:
                 os.kill(int(pid_str), sig)
-        if os.uname()[0] is 'Darwin':
+        elif os.uname()[0] == 'Darwin':
+            # FIXME
             child_pid = parent.get_children(recursive=True)
             for pid in child_pid:
                 pid.send_signal(signal.SIGTERM)
