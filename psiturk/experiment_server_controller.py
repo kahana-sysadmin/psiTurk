@@ -1,26 +1,27 @@
-from __future__ import print_function
-import urllib.parse
-import urllib.error
-import urllib.request
+from __future__ import generator_stop
 import hashlib
 import time
 import psutil
 import socket
 from threading import Thread, Event
 import webbrowser
-import signal
 import subprocess
 import sys
 import os
-from builtins import object
-from future import standard_library
-standard_library.install_aliases()
+import logging
 
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setLevel(logging.INFO)  # TODO: let this be configurable
+stream_formatter = logging.Formatter('%(message)s')
+stream_handler.setFormatter(stream_formatter)
+logger = logging.getLogger(__name__)
+logger.addHandler(stream_handler)
+logger.setLevel(logging.DEBUG)
 
-#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 # Supporting functions
 #   general purpose helper functions used by the dashboard server and controller
-#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 def is_port_available(ip, port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1)
@@ -29,7 +30,8 @@ def is_port_available(ip, port):
         s.shutdown(2)
         return False
     except socket.timeout:
-        print("*** Failed to test port availability. Check that host\nis set properly in config.txt")
+        logger.error("*** Failed to test port availability. "
+                     "Check that host is set properly in config.txt")
         return True
     except socket.error as e:
         return True
@@ -37,9 +39,9 @@ def is_port_available(ip, port):
 
 def wait_until_online(function, ip, port):
     """
-    Uses Wait_For_State to wait for the server to come online, then runs the given function.
+    Uses WaitForState to wait for the server to come online, then runs the given function.
     """
-    awaiting_service = Wait_For_State(
+    awaiting_service = WaitForState(
         lambda: not is_port_available(ip, port), function)
     awaiting_service.start()
     return awaiting_service
@@ -59,14 +61,14 @@ def launch_browser_when_online(ip, port, route):
 # handles waiting for processes which we don't control (e.g.,
 # browser requests)
 # ----------------------------------------------------------------
-class Wait_For_State(Thread):
+class WaitForState(Thread):
     """
     Waits for a state-checking function to return True, then runs a given
     function. For example, this is used to launch the browser once the server is
     started up.
 
     Example:
-    t = Wait_For_State(lambda: server.check_port_state(), lambda: print "Server has started!")
+    t = WaitForState(lambda: server.check_port_state(), lambda: print "Server has started!")
     t.start()
     t.cancel() # Cancels thread
     """
@@ -113,97 +115,92 @@ class ExperimentServerController(object):
         self.config = config
         self.server_running = False
 
-    def get_ppid(self):
-        if not self.is_port_available():
-            url = "http://{hostname}:{port}/ppid".format(hostname=self.config.get(
-                "Server Parameters", "host"), port=self.config.getint("Server Parameters", "port"))
-            ppid_request = urllib.request.Request(url)
-            ppid = urllib.request.urlopen(ppid_request).read()
-            return ppid
-        else:
-            raise ExperimentServerControllerException(
-                "Cannot shut down experiment server, server not online")
-
     def restart(self):
         self.shutdown()
         self.startup()
 
-    def shutdown(self, ppid=None):
-        if not ppid:
-            ppid = self.get_ppid()
-        print("Shutting down experiment server at pid %s..." % ppid)
-        try:
-            os.kill(int(ppid), signal.SIGKILL)
-            self.server_running = False
-        except ExperimentServerControllerException:
-            print(ExperimentServerControllerException)
-        else:
-            self.server_running = False
+    def on_terminate(self, proc: psutil.Process):
+        logger.debug("process {} terminated with exit code {}".format(
+            proc, proc.returncode))
 
-    def kill_child_processes(self, parent_pid, sig=signal.SIGTERM):
-        if os.uname()[0] == 'Linux':
-            ps_command = subprocess.Popen(f'pstree -p {parent_pid} | perl -ne \'print "$1 \
-                                          " while /\((\d+)\)/g\'',
-                                          shell=True, stdout=subprocess.PIPE)
-            ps_output = ps_command.stdout.read()
-            retcode = ps_command.wait()
-            assert retcode == 0, f"ps command returned {retcode}"
-            for pid_str in ps_output.split(b"\n")[:-1]:
-                os.kill(int(pid_str), sig)
-        elif os.uname()[0] == 'Darwin':
-            # FIXME
-            parent  = psutil.Process(parent_pid)
-            child_pid = parent.children(recursive=True)
-            for pid in child_pid:
-                pid.send_signal(signal.SIGTERM)
+    def kill_process_tree(self, proc: psutil.Process):
+        """Kill process tree with given process object.
+
+        Caller should be prepared to catch psutil Process class exceptions.
+        """
+        children = proc.children(recursive=True)
+        children.append(proc)
+        for c in children:
+            c.terminate()
+        gone, alive = psutil.wait_procs(children, timeout=10, callback=self.on_terminate)
+        for survivor in alive:
+            survivor.kill()
+
+    def shutdown(self, ppid=None):
+        proc_hash = self.get_project_hash()
+        psiturk_master_procs = [p for p in psutil.process_iter(
+            ['pid', 'cmdline', 'exe', 'name']) if proc_hash in str(p.info) and
+                               'master' in str(p.info)]
+        if len(psiturk_master_procs) < 1:
+            logger.warning('No active server process found.')
+            self.server_running = False
+            return
+        for p in psiturk_master_procs:
+            logger.info('Shutting down experiment server at pid %s ... ' % p.info['pid'])
+            try:
+                self.kill_process_tree(p)
+            except psutil.NoSuchProcess as e:
+                logger.error('Attempt to shut down PID {} failed with exception {}'.format(
+                    p.as_dict['pid'], e
+                ))
+        # NoSuchProcess exceptions imply server is not running, so seems safe.
+        self.server_running = False
+
+    def check_server_process_running(self, process_hash):
+        server_process_running = False
+        for proc in psutil.process_iter():
+            if process_hash in str(proc.as_dict(['cmdline'])):
+                server_process_running = True
+                break
+        return server_process_running
+
+    def get_project_hash(self):
+        project_hash = 'psiturk_experiment_server_{}'.format(
+            hashlib.sha1(os.getcwd().encode()).hexdigest()[:12]
+        )
+        return project_hash
 
     def is_server_running(self):
-        project_hash = hashlib.sha1(os.getcwd().encode()).hexdigest()[:12]
-        # find server processes run by this user from this folder
-        PROCNAME = "psiturk_experiment_server_" + project_hash
-        cmd = "ps -o pid,command | grep '" + PROCNAME + \
-            "' | grep -v grep | awk '{print $1}'"
-        psiturk_exp_processes = subprocess.Popen(
-            cmd, shell=True, stdout=subprocess.PIPE)
-        output = psiturk_exp_processes.stdout.readlines()
-        parent = psutil.Process(psiturk_exp_processes.pid)
-        self.kill_child_processes(parent.pid)
-
-        if output:
-            is_psiturk_using_port = True
-        else:
-            is_psiturk_using_port = False
-        is_port_open = self.is_port_available()
-        #print self.server_running, " ", portopen
-        if is_port_open and is_psiturk_using_port:  # This should never occur
+        process_hash = self.get_project_hash()
+        server_process_running = self.check_server_process_running(process_hash)
+        port_is_open = self.is_port_available()
+        if port_is_open and server_process_running:  # This should never occur
             return 'maybe'
-        elif not is_port_open and not is_psiturk_using_port:
-            return 'blocked'
-        elif is_port_open and not is_psiturk_using_port:
+        elif port_is_open and not server_process_running:
             return 'no'
-        elif not is_port_open and is_psiturk_using_port:
+        elif not port_is_open and server_process_running:
             return 'yes'
+        elif not port_is_open and not server_process_running:
+            return 'blocked'
 
     def is_port_available(self):
-        return is_port_available(self.config.get("Server Parameters", "host"), self.config.getint("Server Parameters", "port"))
+        return is_port_available(self.config.get("Server Parameters", "host"),
+                                 self.config.getint("Server Parameters", "port"))
 
     def startup(self):
-        server_command = "{python_exec} '{server_script}'".format(
-            python_exec=sys.executable,
-            server_script=os.path.join(os.path.dirname(
-                __file__), "experiment_server.py")
-        )
+        server_script = os.path.join(os.path.dirname(
+            __file__), "experiment_server.py")
+        server_command = f"{sys.executable} '{server_script}'"
         server_status = self.is_server_running()
         if server_status == 'no':
-            #print "Running experiment server with command:", server_command
             subprocess.Popen(server_command, shell=True, close_fds=True)
-            print("Experiment server launching...")
+            logging.info("Experiment server launching...")
             self.server_running = True
         elif server_status == 'maybe':
-            print("Error: Not sure what to tell you...")
+            logging.error("Error: Not sure what to tell you...")
         elif server_status == 'yes':
-            print("Experiment server may be already running...")
+            logging.warning("Experiment server may be already running...")
         elif server_status == 'blocked':
-            print(
+            logging.warning(
                 "Another process is running on the desired port. Try using a different port number.")
         time.sleep(1.2)  # Allow CLI to catch up.
