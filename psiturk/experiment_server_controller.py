@@ -152,7 +152,8 @@ class ExperimentServerController(object):
                 os.kill(int(pid_str), sig)
         elif os.uname()[0] == 'Darwin':
             # FIXME
-            child_pid = parent.get_children(recursive=True)
+            parent  = psutil.Process(parent_pid)
+            child_pid = parent.children(recursive=True)
             for pid in child_pid:
                 pid.send_signal(signal.SIGTERM)
 
