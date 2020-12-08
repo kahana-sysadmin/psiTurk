@@ -77,7 +77,6 @@ def check_templates_exist():
             f"{type(e).__name__, str(e)}"
         ))
 
-
 check_templates_exist()
 
 
@@ -688,7 +687,6 @@ def debug_complete():
                 return render_template('complete.html',
                                        allow_repeats=allow_repeats,
                                        worker_id=user.workerid)
-
 
 
 @app.route('/worker_complete', methods=['GET'])
