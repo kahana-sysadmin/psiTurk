@@ -1,27 +1,19 @@
 # -*- coding: utf-8 -*-
 """ This module provides the backend Flask server used by psiTurk. """
-from __future__ import print_function
-from __future__ import absolute_import
-
-from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv(usecwd=True))
-
-from .psiturk_statuses import *
-from builtins import str
-from builtins import range
+from __future__ import generator_stop
 import os
 import sys
 import datetime
 import logging
 from random import choice
 import user_agents
-import string
 import requests
 import re
 import json
 import uuid
 from jinja2 import TemplateNotFound
 from collections import Counter
+
 
 # Setup flask
 from flask import Flask, render_template, render_template_string, request, \
@@ -33,8 +25,9 @@ from .db import db_session, init_db
 from .models import Participant
 from sqlalchemy import or_, exc
 
+from .psiturk_statuses import *
 from .psiturk_config import PsiturkConfig
-from .experiment_errors import ExperimentError, ExperimentApiError, InvalidUsageError
+from .experiment_errors import ExperimentError, ExperimentApiError
 from .user_utils import nocache
 
 # Setup config
@@ -63,7 +56,7 @@ logging.basicConfig(filename=LOG_FILE_PATH, format='%(asctime)s %(message)s',
 app = Flask("Experiment_Server")
 
 # experiment server logging
-if 'gunicorn' in os.environ.get('SERVER_SOFTWARE',''):
+if 'gunicorn' in os.environ.get('SERVER_SOFTWARE', ''):
     gunicorn_error_logger = logging.getLogger('gunicorn.error')
     app.logger.handlers.extend(gunicorn_error_logger.handlers)
 
@@ -71,16 +64,21 @@ if 'gunicorn' in os.environ.get('SERVER_SOFTWARE',''):
 app.config.update(SEND_FILE_MAX_AGE_DEFAULT=10)
 app.secret_key = CONFIG.get('Server Parameters', 'secret_key')
 
-# this checks for templates that are required if you are hosting your own ad.
+
 def check_templates_exist():
+    # this checks for templates that are required if you are hosting your own ad.
+    try_these = ['thanks-mturksubmit.html', 'closepopup.html']
     try:
         try_these = ['thanks-mturksubmit.html', 'closepopup.html']
         [app.jinja_env.get_template(try_this) for try_this in try_these]
     except TemplateNotFound as e:
-        raise RuntimeError('Missing one of the following templates: {}. Copy these over from a freshly-created psiturk example experiment. {}: {}'.format(', '.join(try_these), type(e).__name__, str(e)))
+        raise RuntimeError((
+            f"Missing one of the following templates: {', '.join(try_these)}."
+            f"Copy these over from a freshly-created psiturk example experiment."
+            f"{type(e).__name__, str(e)}"
+        ))
 
-if not CONFIG['Shell Parameters'].getboolean('use_psiturk_ad_server'):
-    check_templates_exist()
+check_templates_exist()
 
 
 # Serving warm, fresh, & sweet custom, user-provided routes
@@ -99,10 +97,12 @@ except ImportError as e:
 else:
     app.register_blueprint(custom_code)
     try:
+        # noinspection PyUnresolvedReferences
         from custom import init_app as custom_init_app
-        custom_init_app(app)
     except ImportError as e:
         pass
+    else:
+        custom_init_app(app)
 
 # scheduler
 
@@ -113,7 +113,7 @@ from .db import engine
 jobstores = {
     'default': SQLAlchemyJobStore(engine=engine)
 }
-if 'gunicorn' in os.environ.get('SERVER_SOFTWARE',''):
+if 'gunicorn' in os.environ.get('SERVER_SOFTWARE', ''):
     from apscheduler.schedulers.gevent import GeventScheduler as Scheduler
 else:
     from apscheduler.schedulers.background import BackgroundScheduler as Scheduler
@@ -122,15 +122,15 @@ scheduler = Scheduler(jobstores=jobstores, timezone=utc)
 app.apscheduler = scheduler
 scheduler.app = app
 
-if (os.getenv('PSITURK_DO_SCHEDULER', False)):
+if CONFIG.get('Server Parameters', 'do_scheduler'):
     scheduler.start()
 
 
 #
 # Dashboard
 #
-if (os.getenv('PSITURK_ENABLE_DASHBOARD', False)):
-    from .dashboard import dashboard, init_app as dashboard_init_app # management dashboard
+if CONFIG.get('Server Parameters', 'enable_dashboard'):
+    from .dashboard import dashboard, init_app as dashboard_init_app  # management dashboard
     app.register_blueprint(dashboard)
     dashboard_init_app(app)
 
@@ -138,10 +138,6 @@ if (os.getenv('PSITURK_ENABLE_DASHBOARD', False)):
     app.register_blueprint(api_blueprint)
 
 init_db()
-
-
-
-
 
 # Read psiturk.js file into memory
 PSITURK_JS_FILE = os.path.join(os.path.dirname(__file__),
@@ -159,12 +155,13 @@ def handle_exp_error(exception):
     """Handle errors by sending an error page."""
     app.logger.error(
         "%s (%s) %s", exception.value, exception.errornum, str(dict(request.args)))
-    return exception.error_page(request, CONFIG.get('HIT Configuration',
+    return exception.error_page(request, CONFIG.get('Task Parameters',
                                                     'contact_email_on_error'))
 
-# for use with API errors
+
 @app.errorhandler(ExperimentApiError)
 def handle_experiment_api_error(error):
+    # for use with API errors
     response = jsonify(error.to_dict())
     response.status_code = error.status_code
     app.logger.error(error.message)
@@ -173,7 +170,7 @@ def handle_experiment_api_error(error):
 
 @app.teardown_request
 def shutdown_session(_=None):
-    ''' Shut down session route '''
+    """ Shut down session route """
     db_session.remove()
 
 
@@ -192,7 +189,7 @@ def get_random_condcount(mode):
 
     Returns a tuple: (cond, condition)
     """
-    cutofftime = datetime.timedelta(minutes=-CONFIG.getint('Server Parameters',
+    cutofftime = datetime.timedelta(minutes=-CONFIG.getint('Task Parameters',
                                                            'cutoff_time'))
     starttime = datetime.datetime.now(datetime.timezone.utc) + cutofftime
 
@@ -201,7 +198,7 @@ def get_random_condcount(mode):
             open(os.path.join(app.root_path, 'conditions.json')))
         numconds = len(list(conditions.keys()))
         numcounts = 1
-    except IOError as e:
+    except IOError:
         numconds = CONFIG.getint('Task Parameters', 'num_conds')
         numcounts = CONFIG.getint('Task Parameters', 'num_counters')
 
@@ -225,11 +222,10 @@ def get_random_condcount(mode):
     mincount = min(counts.values())
     minima = [hsh for hsh, count in counts.items() if count == mincount]
     chosen = choice(minima)
-    #conds += [ 0 for _ in range(1000) ]
-    #conds += [ 1 for _ in range(1000) ]
     app.logger.info("given %(a)s chose %(b)s" % {'a': counts, 'b': chosen})
 
     return chosen
+
 
 try:
     from custom import custom_get_condition as get_condition
@@ -239,35 +235,36 @@ except (ModuleNotFoundError, ImportError):
 # Routes
 # ======
 
+
 @app.route('/')
 @nocache
 def index():
-    ''' Index route '''
+    """ Index route """
     return render_template('default.html')
 
 
 @app.route('/favicon.ico')
 def favicon():
-    ''' Serve favicon '''
+    """ Serve favicon """
     return app.send_static_file('favicon.ico')
 
 
 @app.route('/static/js/psiturk.js')
 def psiturk_js():
-    ''' psiTurk js route '''
+    """ psiTurk js route """
     return render_template_string(PSITURK_JS_CODE)
 
 
 @app.route('/check_worker_status', methods=['GET'])
 def check_worker_status():
-    ''' Check worker status route '''
+    """ Check worker status route """
     if 'workerId' not in request.args:
         resp = {"status": "bad request"}
         return jsonify(**resp)
     else:
         worker_id = request.args['workerId']
         assignment_id = request.args['assignmentId']
-        allow_repeats = CONFIG.getboolean('HIT Configuration', 'allow_repeats')
+        allow_repeats = CONFIG.getboolean('Task Parameters', 'allow_repeats')
         if allow_repeats:  # if you allow repeats focus on current worker/assignment combo
             try:
                 part = Participant.query.\
@@ -309,7 +306,7 @@ def advertisement():
     user_agent_string = request.user_agent.string
     user_agent_obj = user_agents.parse(user_agent_string)
     browser_ok = True
-    browser_exclude_rule = CONFIG.get('HIT Configuration', 'browser_exclude_rule')
+    browser_exclude_rule = CONFIG.get('Task Parameters', 'browser_exclude_rule')
     for rule in browser_exclude_rule.split(','):
         myrule = rule.strip()
         if myrule in ["mobile", "tablet", "touchcapable", "pc", "bot"]:
@@ -319,7 +316,7 @@ def advertisement():
                (myrule == "pc" and user_agent_obj.is_pc) or\
                (myrule == "bot" and user_agent_obj.is_bot):
                 browser_ok = False
-        elif (myrule == "Safari" or myrule == "safari"):
+        elif myrule == "Safari" or myrule == "safari":
             if "Chrome" in user_agent_string and "Safari" in user_agent_string:
                 pass
             elif "Safari" in user_agent_string:
@@ -351,10 +348,7 @@ def advertisement():
         debug_mode = False
     already_in_db = False
 
-    # FIXME PROLIFIC
     if 'workerId' in request.args:
-
-        # FIXME PROLIFIC
         worker_id = request.args['workerId']
         # First check if this workerId has completed the task before (v1).
         nrecords = Participant.query.\
@@ -374,39 +368,28 @@ def advertisement():
     except exc.SQLAlchemyError:
         status = None
 
-    allow_repeats = CONFIG.getboolean('HIT Configuration', 'allow_repeats')
+    allow_repeats = CONFIG.getboolean('Task Parameters', 'allow_repeats')
     if (status == STARTED or status == QUITEARLY) and not debug_mode:
         # Once participants have finished the instructions, we do not allow
         # them to start the task again.
         raise ExperimentError('already_started_exp_mturk')
-    # FIXME resubmit for PROLIFIC
     elif status == COMPLETED or (status == SUBMITTED and not already_in_db):
         # 'or status == SUBMITTED' because we suspect that sometimes the post
         # to mturk fails after we've set status to SUBMITTED, so really they
         # have not successfully submitted. This gives another chance for the
         # submit to work when not using the psiturk ad server.
-        use_psiturk_ad_server = CONFIG.getboolean(
-            'Shell Parameters', 'use_psiturk_ad_server')
-        if not use_psiturk_ad_server:
-            # They've finished the experiment but haven't successfully submitted the HIT
-            # yet.
-            if mode == 'prolific':
-                # TODO
-                completion_url = CONFIG.get("HIT Configuration", "completion_url")
-                return render_template(
-                        'complete-prolific.html',
-                        completion_url=completion_url)
-            else:
-                return render_template(
-                    'thanks-mturksubmit.html',
-                    using_sandbox=(mode == "sandbox"),
-                    hitid=hit_id,
-                    assignmentid=assignment_id,
-                    workerid=worker_id
-                )
+        if mode == 'prolific':
+            completion_url = CONFIG.get("Task parameters", "completion_url")
+            return render_template(
+                    'complete-prolific.html',
+                    completion_url=completion_url)
         else:
-            # Show them a thanks message and tell them to go away.
-            return render_template('thanks.html')
+            return render_template(
+                'thanks-mturksubmit.html',
+                using_sandbox=(mode == "sandbox"),
+                hitid=hit_id,
+                assignmentid=assignment_id,
+                workerid=worker_id)
     elif already_in_db and not (debug_mode or allow_repeats):
         raise ExperimentError('already_did_exp_hit')
     elif status == ALLOCATED or not status or debug_mode:
@@ -431,7 +414,6 @@ def give_consent():
     """
     Serves up the consent in the popup window.
     """
-    # FIXME PROLIFIC
     if not ('hitId' in request.args and 'assignmentId' in request.args and
             'workerId' in request.args):
         raise ExperimentError('hit_assign_worker_id_not_set_in_consent')
@@ -450,22 +432,6 @@ def give_consent():
     )
 
 
-def get_ad_via_hitid(hit_id):
-    ''' Get ad via HIT id '''
-    username = CONFIG.get('psiTurk Access', 'psiturk_access_key_id')
-    password = CONFIG.get('psiTurk Access', 'psiturk_secret_access_id')
-    try:
-        req = requests.get('https://api.psiturk.org/api/ad/lookup/' + hit_id,
-                           auth=(username, password))
-    except:
-        raise ExperimentError('api_server_not_reachable')
-    else:
-        if req.status_code == 200:
-            return req.json()['ad_id']
-        else:
-            return "error"
-
-
 @app.route('/exp', methods=['GET'])
 @nocache
 def start_exp():
@@ -478,7 +444,6 @@ def start_exp():
     worker_id = request.args['workerId']
     mode = request.args['mode']
 
-    # FIXME PROLIFIC
     app.logger.info("Accessing /exp: %(h)s %(a)s %(w)s " % {
         "h": hit_id,
         "a": assignment_id,
@@ -491,8 +456,7 @@ def start_exp():
 
     # Check first to see if this hitId or assignmentId exists.  If so, check to
     # see if inExp is set
-    allow_repeats = CONFIG.getboolean('HIT Configuration', 'allow_repeats')
-    # FIXME PROLIFIC
+    allow_repeats = CONFIG.getboolean('Task Parameters', 'allow_repeats')
     if allow_repeats:
         matches = Participant.query.\
             filter(Participant.workerid == worker_id).\
@@ -565,24 +529,7 @@ def start_exp():
             if other_assignment:
                 raise ExperimentError('already_did_exp_hit')
 
-    use_psiturk_ad_server = CONFIG.getboolean(
-        'Shell Parameters', 'use_psiturk_ad_server')
-    if use_psiturk_ad_server and (mode == 'sandbox' or mode == 'live'):
-        # If everything goes ok here relatively safe to assume we can lookup
-        # the ad.
-        # FIXME PROLIFIC
-        ad_id = get_ad_via_hitid(hit_id)
-        if ad_id != "error":
-            if mode == "sandbox":
-                ad_server_location = 'https://sandbox.ad.psiturk.org/complete/'\
-                    + str(ad_id)
-            elif mode == "live":
-                ad_server_location = 'https://ad.psiturk.org/complete/' +\
-                    str(ad_id)
-        else:
-            raise ExperimentError('hit_not_registered_with_ad_server')
-    else:
-        ad_server_location = '/complete'
+    ad_server_location = '/complete'
 
     return render_template(
         'exp.html', uniqueId=part.uniqueid,
@@ -591,11 +538,10 @@ def start_exp():
         adServerLoc=ad_server_location,
         mode=mode,
         contact_address=CONFIG.get(
-            'HIT Configuration', 'contact_email_on_error'),
+            'Task Parameters', 'contact_email_on_error'),
         codeversion=CONFIG.get(
             'Task Parameters', 'experiment_code_version')
     )
-
 
 @app.route('/inexp', methods=['POST'])
 def enterexp():
@@ -607,7 +553,7 @@ def enterexp():
     referesh to start over).
     """
     app.logger.info("Accessing /inexp")
-    if not 'uniqueId' in request.form:
+    if 'uniqueId' not in request.form:
         raise ExperimentError('improper_inputs')
     unique_id = request.form['uniqueId']
 
@@ -641,20 +587,19 @@ def load(uid=None):
             one()
     except exc.SQLAlchemyError:
         app.logger.error("DB error: Unique user not found.")
-
-    try:
-        resp = json.loads(user.datastring)
-    except:
-        resp = {
-            "condition": user.cond,
-            "counterbalance": user.counterbalance,
-            "assignmentId": user.assignmentid,
-            "workerId": user.workerid,
-            "hitId": user.hitid,
-            "bonus": user.bonus
-        }
-
-    return jsonify(**resp)
+    else:
+        try:
+            resp = json.loads(user.datastring)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            resp = {
+                "condition": user.cond,
+                "counterbalance": user.counterbalance,
+                "assignmentId": user.assignmentid,
+                "workerId": user.workerid,
+                "hitId": user.hitid,
+                "bonus": user.bonus
+            }
+        return jsonify(**resp)
 
 
 @app.route('/sync/<uid>', methods=['PUT'])
@@ -722,8 +667,8 @@ def quitter():
 @app.route('/complete', methods=['GET'])
 @nocache
 def debug_complete():
-    ''' Debugging route for complete. '''
-    if not 'uniqueId' in request.args:
+    """ Debugging route for complete. """
+    if 'uniqueId' not in request.args:
         raise ExperimentError('improper_inputs')
     else:
         unique_id = request.args['uniqueId']
@@ -735,26 +680,26 @@ def debug_complete():
             user.endhit = datetime.datetime.now(datetime.timezone.utc)
             db_session.add(user)
             db_session.commit()
-        except:
+        except exc.SQLAlchemyError:
             raise ExperimentError('error_setting_worker_complete')
         else:
             # send them back to mturk.
-            if (mode == 'sandbox' or mode == 'live'):
+            if mode == 'sandbox' or mode == 'live':
                 return render_template('closepopup.html')
             elif mode == 'prolific':
-                completion_url = CONFIG.get('HIT Configuration', 'completion_url')
+                completion_url = CONFIG.get('Task Parameters', 'completion_url')
                 return render_template('complete-prolific.html', completion_url=completion_url)
             else:
-                allow_repeats = CONFIG.getboolean('HIT Configuration', 'allow_repeats')
+                allow_repeats = CONFIG.getboolean('Task Parameters', 'allow_repeats')
                 return render_template('complete.html',
-                    allow_repeats=allow_repeats, worker_id=user.workerid)
-
+                                       allow_repeats=allow_repeats,
+                                       worker_id=user.workerid)
 
 
 @app.route('/worker_complete', methods=['GET'])
 def worker_complete():
-    ''' Complete worker. '''
-    if not 'uniqueId' in request.args:
+    """ Complete worker. """
+    if 'uniqueId' not in request.args:
         resp = {"status": "bad request"}
         return jsonify(**resp)
     else:
@@ -790,8 +735,8 @@ def process_audio(filename=None):
 
 @app.route('/worker_submitted', methods=['GET'])
 def worker_submitted():
-    ''' Submit worker '''
-    if not 'uniqueId' in request.args:
+    """ Submit worker """
+    if 'uniqueId' not in request.args:
         resp = {"status": "bad request"}
         return jsonify(**resp)
     else:
@@ -812,7 +757,7 @@ def worker_submitted():
 # Is this a security risk?
 @app.route("/ppid")
 def ppid():
-    ''' Get ppid '''
+    """ Get ppid """
     proc_id = os.getppid()
     return str(proc_id)
 
@@ -821,7 +766,7 @@ def ppid():
 
 
 def insert_mode(page_html, mode):
-    ''' Insert mode '''
+    """ Insert mode """
     page_html = page_html
     match_found = False
     matches = re.finditer('workerId={{ workerid }}', page_html)
@@ -846,11 +791,12 @@ def regularpage(path):
     """
     return send_from_directory('templates', path)
 
+
 def run_webserver():
-    ''' Run web server '''
+    """ Run web server """
     host = CONFIG.get('Server Parameters', 'host')
     port = CONFIG.getint('Server Parameters', 'port')
-    print("Serving on http://{}:{}".format(host, port))
+    print(f"Serving on http://{host}:{port}")
     app.config['TEMPLATES_AUTO_RELOAD'] = True
     app.jinja_env.auto_reload = True
     app.run(debug=True, host=host, port=port)

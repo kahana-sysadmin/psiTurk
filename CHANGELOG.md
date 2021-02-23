@@ -9,12 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Drop support for python2
 - upgrade cmd2 to 0.9 (python3 only)
+- moved `contact_email_on_error` and `cutoff_time` under the `Task Parameters` section.
 
 ### Added
 - add ability to customize participant condition assignment. (see 309a623)
 - add a sweet dashboard for doing amazing things, and the beginnings of a sort-of REST API that the dashboard uses.
   See `/dashboard` route.
 - if a commonly-forgotten required template is missing when not using the psiturk ad server, raise an exception
+
+## [2.3.11]
+### Fixed
+- fix unable to do non-aws things on without aws credentials (#427)
+
+## [2.3.10]
+### Fixed
+-- patch pass bonus amount as shell arg
 
 ## [2.3.9]
 ### Fixed
