@@ -19,6 +19,7 @@ import string
 import requests
 import re
 import json
+import uuid
 from jinja2 import TemplateNotFound
 from collections import Counter
 
@@ -330,12 +331,20 @@ def advertisement():
         # Handler for IE users if IE is not supported.
         raise ExperimentError('browser_type_not_allowed')
 
+    worker_id = None
+    assignment_id = None
+    hit_id = None
     if not ('hitId' in request.args and 'assignmentId' in request.args):
-        raise ExperimentError('hit_assign_worker_id_not_set_in_mturk')
-    
-    hit_id = request.args['hitId']
-    assignment_id = request.args['assignmentId']
-    mode = request.args['mode']
+	    mode = 'debug'
+	    hit_id = uuid.uuid4().hex +  "debug"
+	    assignment_id = uuid.uuid4().hex +  "debug"
+	    worker_id =  uuid.uuid4().hex + "debug"
+	    #raise ExperimentError('hit_assign_worker_id_not_set_in_mturk')
+    else:
+	    hit_id = request.args['hitId']
+	    assignment_id = request.args['assignmentId']
+	    mode = request.args['mode']
+
     if hit_id[:5] == "debug":
         debug_mode = True
     else:
@@ -355,8 +364,6 @@ def advertisement():
 
         if nrecords > 0:  # Already completed task
             already_in_db = True
-    else:  # If worker has not accepted the hit
-        worker_id = None
     try:
         part = Participant.query.\
             filter(Participant.hitid == hit_id).\
